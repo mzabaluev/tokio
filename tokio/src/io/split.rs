@@ -4,7 +4,6 @@
 //! To restore this read/write object from its `split::ReadHalf` and
 //! `split::WriteHalf` use `unsplit`.
 
-use crate::io::vec::AsyncVectoredWrite;
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use std::cell::UnsafeCell;
@@ -25,6 +24,7 @@ cfg_io_util! {
     /// The writable half of a value returned from [`split`](split()).
     pub struct WriteHalf<T> {
         inner: Arc<Inner<T>>,
+        is_vectored: bool,
     }
 
     /// Splits a single value implementing `AsyncRead + AsyncWrite` into separate
@@ -36,6 +36,7 @@ cfg_io_util! {
     where
         T: AsyncRead + AsyncWrite,
     {
+        let is_write_vectored = stream.is_write_vectored();
         let inner = Arc::new(Inner {
             locked: AtomicBool::new(false),
             stream: UnsafeCell::new(stream),
@@ -45,7 +46,7 @@ cfg_io_util! {
             inner: inner.clone(),
         };
 
-        let wr = WriteHalf { inner };
+        let wr = WriteHalf { inner, is_vectored: is_write_vectored };
 
         (rd, wr)
     }
@@ -119,6 +120,19 @@ impl<T: AsyncWrite> AsyncWrite for WriteHalf<T> {
         inner.stream_pin().poll_write(cx, buf)
     }
 
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let mut inner = ready!(self.inner.poll_lock(cx));
+        inner.stream_pin().poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.is_vectored
+    }
+
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
         let mut inner = ready!(self.inner.poll_lock(cx));
         inner.stream_pin().poll_flush(cx)
@@ -127,17 +141,6 @@ impl<T: AsyncWrite> AsyncWrite for WriteHalf<T> {
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
         let mut inner = ready!(self.inner.poll_lock(cx));
         inner.stream_pin().poll_shutdown(cx)
-    }
-}
-
-impl<T: AsyncVectoredWrite> AsyncVectoredWrite for WriteHalf<T> {
-    fn poll_write_vectored(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        bufs: &[IoSlice<'_>],
-    ) -> Poll<io::Result<usize>> {
-        let mut inner = ready!(self.inner.poll_lock(cx));
-        inner.stream_pin().poll_write_vectored(cx, bufs)
     }
 }
 
